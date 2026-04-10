@@ -1,12 +1,14 @@
 # MC_CapstoneProject
 
-MC_CapstoneProject
+
 **Project Summary**
+
 Master Control has two different products MX and QX. QX is a much more established product and has a higher conversion rate in the sales pipeline, compared to MX. QX converts at 19.7% vs 12.9% for MX. Data analysis was done to better predict what makes a good MX customer, so the sales pipeline could be more efficient. A pipeline was created to take leads and score them through a model to determine the probability they would progress through the sales pipeline.
 Inbound sales leads over a two year period were analyzed. This contained information about the company that was interested in the product as well as information about how they came into the sales pipeline.
 By creating this, Master Control can better utilize sales resources targeting and focusing on higher quality leads. The target audience for this was both the data analytics team and marketing, so both technical and business applications were considered and presented.
 
 **Solution**
+
 First, as a group, exploratory analysis to understand what factors were driving conversions was performed. This showed us that there was strong signal across various available data points, and missing or low quality data was a big predictor of leads not converting.
 Next a data preprocessing pipeline was developed for cleaning and standardizing data. This would allow for future leads to easily be scored.
 After this, several modeling approaches were attempted and then compared to determine which had the strongest predictive performance. One of the biggest concerns for this project was that any modeling performed was explainable, so black box models were not heavily explored. Regression, decision trees, random forest, XGBoost and EBM (explainable boosted model) were all utilized. Ultimately the EBM model was chosen as it had the best performance and was explainable.
