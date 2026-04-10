@@ -1,0 +1,1060 @@
+---
+title: "Master Control"
+author: "Joel Jorgensen"
+date: "2026-04-10"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    embed-resources: true
+execute:
+  include: true
+  eval: true
+  warning: false
+  message: false
+editor: 
+  markdown: 
+    wrap: sentence
+---
+
+# Introduction
+
+### Business Problem
+
+Master Control has two different products MX and QX. QX is a much more established product and has a higher conversion rate in the sales pipeline, compared to MX. QX converts at 19.7% vs 12.9% for MX. Data analysis was done to better predict what makes a good MX customer, so the sales pipeline could be more efficient. A pipeline was created to take leads and score them through a model to determine the probability they would progress through the sales pipeline. Inbound sales leads over a two year period were analyzed. This contained information about the company that was interested in the product as well as information about how they came into the sales pipeline. By creating this, Master Control can better utilize sales resources targeting and focusing on higher quality leads. The target audience for this was both the data analytics team and marketing, so both technical and business applications were considered and presented.
+
+# Data Exploration
+
+### Setup
+
+```{r Setup, warning=FALSE}
+
+# install.packages
+pacman::p_load(tidyverse,stringr,tidytext,quanteda,quanteda.textplots,janitor,skimr,recipes,
+               cluster,factoextra,FactoMineR,proxy,dendextend,pheatmap,Rtsne,fpc)
+```
+
+### Load Data
+
+```{r Load Data, warning=FALSE}
+
+# Load Data
+leads <- read_csv("Mastercontrol QAL Performance.csv")
+
+
+# Basic structure
+dim(leads)
+glimpse(leads)
+
+# Clean column names for easier coding
+leads <- clean_names(leads)
+names(leads)
+
+# Quick preview
+head(leads)
+
+# Basic summary statistics
+summary(leads)
+
+# Check missing values 
+colSums(is.na(leads))
+
+#view data set
+#view(leads)
+
+# Check for duplicate rows by qal_id
+sum(duplicated(leads$qal_id))
+
+# Check which leads are duplicated
+leads$qal_id[duplicated(leads$qal_id)]
+
+```
+
+
+### Missing Data
+
+```{r }
+
+# Count missing values per column
+missing_values <- leads %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "n_missing") %>%
+  mutate(
+    pct_missing = 100 * n_missing / nrow(leads)
+  ) %>%
+  arrange(desc(pct_missing))
+
+missing_values
+
+```
+
+#### Missing Data Overview
+
+The dataset contains several fields with notable missingness.
+The table below shows the number and percentage of missing values for each variable.
+Three variables have substantial missingness:
+
+-   **acct_primary_site_function — 40.9% missing**\
+-   **acct_manufacturing_model — 40.9% missing**\
+-   **contact_lead_title — 38.1% missing**
+
+
+### Contact Lead Title - Additional Cleaning Steps
+
+Before we do any in depth cleaning and standardization, we start by checking to see the number of unique and missing values for contact_lead_title field.
+
+This field is free form entry, therefore this field has a huge variation in job titles.
+In future modeling, this will create additional noise and difficulty in interpretation.
+
+```{r}
+
+leads |>
+  summarise(n = n(), n_unique = n_distinct(contact_lead_title),
+            n_missing = sum(is.na(contact_lead_title) | contact_lead_title == ""))
+```
+
+**Unique Contact Lead Titles**
+
+There are 5,791 unique contact lead titles within the dataset.
+The goal is to reduce the number of unique values to make grouping/clustering simpler for further analysis.
+
+#### Pre-Processing Cleaning
+
+Pre-processing steps are completed to reduce the number of unique values.
+This includes removing punctuation or special characters, numbers, errant spacing, converting to lower case and removing stop words.
+
+```{r}
+#remove special characters
+leads <- leads |> mutate(
+  contact_lead_title = contact_lead_title |>
+    str_to_lower() |>
+    str_replace_all("[^a-z\\s]", "") |>
+    str_replace_all("\\s+", " ") |>
+    str_trim()
+)
+
+stop_words_vec <- tidytext::stop_words$word
+
+leads <- leads |>
+  mutate(
+    contact_lead_title = map_chr(
+      contact_lead_title,
+      ~ if (is.na(.x)) {
+          NA_character_ #preserves NA values for now instead of turning to a string with value of NA
+        } else {
+          words <- str_split(.x, " ")[[1]]
+          paste(words[!words %in% stop_words_vec], collapse = " ")
+        }
+    )
+  )
+
+```
+
+After this cleaning, we see the number of unique is still quite high, with an improvement of about 8% (445 values).
+
+```{r}
+
+leads |>
+  summarise(n = n(), n_unique = n_distinct(contact_lead_title),
+            n_missing = sum(is.na(contact_lead_title) | contact_lead_title == ""))
+```
+
+**Pre-Processing Cleaning Output** The number of unique values decreased from 5,791 to 5,346.
+There needs futher cleaning and or title grouping to lower this value.
+
+#### Common Contact Title Groupings
+
+To try and further reduce the number of unique values, AI was leveraged to come up with a map of common abbreviations and typing errors.
+This value map was then applied to the data, replacing the values where they occurred.
+
+```{r}
+title_map <- c(
+  # --- common misspellings / normalization ---
+  "cheif" = "chief",
+  "chif" = "chief",
+  "cheif executive officer" = "chief executive officer",
+  "chief exec officer" = "chief executive officer",
+  "chief exec" = "chief executive officer",
+  "chief executive" = "chief executive officer",
+  "chief operating" = "chief operating officer",
+  "chief financial" = "chief financial officer",
+  "chief technology" = "chief technology officer",
+  "chief information" = "chief information officer",
+  "chief marketing" = "chief marketing officer",
+  "chief revenue" = "chief revenue officer",
+  "chief product" = "chief product officer",
+  "chief people" = "chief people officer",
+  "chief customer" = "chief customer officer",
+  "chief legal" = "chief legal officer",
+  "chief compliance" = "chief compliance officer",
+  "chief risk" = "chief risk officer",
+  "chief security" = "chief security officer",
+  "chief data" = "chief data officer",
+  "chief analytics" = "chief analytics officer",
+
+  "manger" = "manager",
+  "mngr" = "manager",
+  "managr" = "manager",
+  "dirctor" = "director",
+  "directer" = "director",
+  "v p" = "vice president",
+  "svp" = "senior vice president",
+  "evp" = "executive vice president",
+  "avp" = "assistant vice president",
+  "vpres" = "vice president",
+  "vice pres" = "vice president",
+  "vice-president" = "vice president",
+
+  "asst" = "assistant",
+  "assitant" = "assistant",
+  "assisstant" = "assistant",
+  "assoc" = "associate",
+  "assc" = "associate",
+  "sr" = "senior",
+  "s r" = "senior",
+  "snr" = "senior",
+  "senr" = "senior",
+  "jr" = "junior",
+  "j r" = "junior",
+  "jnr" = "junior",
+  "lead" = "lead",
+  "principal" = "principal",
+  "prinicipal" = "principal",
+  "pricipal" = "principal",
+  "staff" = "staff",
+  "intern" = "intern",
+  "trainee" = "trainee",
+  "apprentice" = "apprentice",
+
+  # --- founders / ownership ---
+  "co founder" = "cofounder",
+  "co-founder" = "cofounder",
+  "cofounder" = "cofounder",
+  "founder" = "founder",
+  "owner" = "owner",
+  "proprietor" = "owner",
+  "partner" = "partner",
+  "managing partner" = "managing partner",
+
+  # --- C-suite acronyms (expand) ---
+  "ceo" = "chief executive officer",
+  "coo" = "chief operating officer",
+  "cfo" = "chief financial officer",
+  "cto" = "chief technology officer",
+  "cio" = "chief information officer",
+  "cmo" = "chief marketing officer",
+  "cro" = "chief revenue officer",
+  "cpo" = "chief product officer",
+  "cdo" = "chief data officer",              # sometimes "chief digital officer"—watch ambiguity
+  "cso" = "chief security officer",          # sometimes "chief strategy officer"—watch ambiguity
+  "chro" = "chief human resources officer",
+  "clo" = "chief legal officer",
+  "cco" = "chief compliance officer",        # sometimes "chief commercial officer"—watch ambiguity
+  "ciso" = "chief information security officer",
+  "cbo" = "chief business officer",
+  "cxo" = "chief executive officer",
+
+  # --- senior leadership / exec roles ---
+  "pres" = "president",
+  "president" = "president",
+  "vice president" = "vice president",
+  "senior vice president" = "senior vice president",
+  "executive vice president" = "executive vice president",
+  "managing director" = "managing director",
+  "md" = "managing director",                # ambiguous in healthcare
+  "gm" = "general manager",                  # ambiguous but common
+  "general mgr" = "general manager",
+
+  # --- management / leadership ---
+  "dir" = "director",
+  "director" = "director",
+  "sr director" = "senior director",
+  "senior director" = "senior director",
+  "exec director" = "executive director",
+  "executive director" = "executive director",
+
+  "mgr" = "manager",
+  "manager" = "manager",
+  "sr mgr" = "senior manager",
+  "senior manager" = "senior manager",
+  "asst manager" = "assistant manager",
+  "assistant manager" = "assistant manager",
+
+  "supervisor" = "supervisor",
+  "team lead" = "team lead",
+  "tl" = "team lead",                        # can be noisy—watch ambiguity
+
+  # --- functional common abbreviations ---
+  "hr" = "human resources",
+  "it" = "information technology",
+  "pr" = "public relations",
+  "qa" = "quality assurance",
+  "qc" = "quality control",
+  "ops" = "operations",
+  "biz dev" = "business development",
+  "bd" = "business development",             # ambiguous (can be “board” in some contexts)
+  "sales rep" = "sales representative",
+  "rep" = "representative",
+  "sr rep" = "senior representative",
+
+  # --- engineering / tech ---
+  "swe" = "software engineer",
+  "sdet" = "software development engineer in test",
+  "devops" = "devops",
+  "dev ops" = "devops",
+  "secops" = "security operations",
+  "data sci" = "data scientist",
+  "ds" = "data scientist",                   # ambiguous
+  "ml" = "machine learning",
+  "ai" = "artificial intelligence",
+
+  # --- product / project (high ambiguity) ---
+  "pm" = "project manager",                  # could be product manager
+  "pmo" = "project management office",
+  "po" = "product owner",
+  "scrum master" = "scrum master",
+
+  # --- finance / accounting ---
+  "acct" = "accountant",
+  "accounting" = "accounting",
+  "fp a" = "financial planning and analysis",
+  "fpa" = "financial planning and analysis",
+  "ap" = "accounts payable",
+  "ar" = "accounts receivable",
+  "cpa" = "certified public accountant",
+
+  # --- legal / compliance / risk ---
+  "gc" = "general counsel",
+  "counsel" = "counsel",
+  "attorney" = "attorney",
+  "compliance" = "compliance",
+  "risk" = "risk",
+  "audit" = "audit",
+
+  # --- customer / service / success ---
+  "cs" = "customer success",                 # ambiguous (computer science)
+  "csr" = "customer service representative",
+  "support" = "support",
+  "customer support" = "customer support",
+
+  # --- misc common role words ---
+  "admin" = "administrator",
+  "administrator" = "administrator",
+  "assistant" = "assistant",
+  "coordinator" = "coordinator",
+  "specialist" = "specialist",
+  "analyst" = "analyst",
+  "consultant" = "consultant",
+  "engineer" = "engineer",
+  "developer" = "developer"
+)
+
+```
+
+```{r}
+replace_word <- function(x, from, to) {
+  str_replace_all(x, regex(paste0("\\b", from, "\\b"), ignore_case = TRUE), to)
+}
+```
+
+```{r}
+leads <- leads |>
+  mutate(
+    contact_lead_title = reduce(
+      names(title_map),
+      .init = contact_lead_title,
+      .f = \(acc, k) replace_word(acc, k, title_map[[k]])
+    ) |>
+      str_replace_all("\\s+", " ") |>
+      str_trim()
+  )
+```
+
+```{r}
+
+leads |>
+  summarise(n = n(), n_unique = n_distinct(contact_lead_title),
+            n_missing = sum(is.na(contact_lead_title) | contact_lead_title == ""))
+
+```
+
+**Contact Lead Title Grouping Output**
+
+This further reduces the unique values down by another \~100 values.
+The problem at this step is that there are varying combinations of common words that can occur in different frequencies.
+
+#### Contact Lead Title Word Cloud
+
+If we look at a word cloud of the most common 50 words, there is no surprise at what shows up the most frequently.
+
+```{r fig.width= 10, fig.height = 10}
+#remove whitespace
+par(mar = c(0,0,0,0), oma = c(0,0,0,0), xaxs = "i", yaxs = "i")
+
+corp <- corpus(leads, text_field = "contact_lead_title")
+toks <- tokens(corp)
+dfm_mat <- dfm(toks)
+
+textplot_wordcloud(dfm_mat, max_words = 50, max_size = 6, min_size = 0.5)
+```
+
+**Word Cloud Output** Manager, quality, director, assurance, and senior are the most common words implicated by the word cloud.
+
+#### Most Common Word Data Frame
+
+To account for the various combination of words, a data frame is created of the most common occurring words.
+Only words that occur at least 5 times are retained.
+These words will be used to create a flag variable if that word occurred or not.
+
+```{r}
+
+top_features <- topfeatures(dfm_mat,10000)
+
+top_features_df <- data.frame(
+  feature = names(top_features),
+  count = as.numeric(top_features))
+
+count(top_features_df)
+
+non_blank <- leads |>
+  summarise(n = n() - sum(is.na(contact_lead_title) | contact_lead_title == "")) |>
+  pull(n)
+  
+top_features_df <- top_features_df |> filter(count >= 5)
+top_features_df <- top_features_df |> mutate(percentage_occured_non_blank = count / non_blank)
+head(top_features_df,10)
+tail(top_features_df,10)
+
+```
+
+**Common Words Data Frame Output**
+
+Above shows the top 10 occurring words, as well as 10 that only occur 5 times, and for both of these In total 361 words clear this threshold.
+It also has the count of unique words in general that occur, of which their are 2,137.
+
+We can see from below that \~34% of titles have "quality", and \~30% have manager.
+
+#### Common Words Bi-Grams
+
+Additionally we can look at just bi-grams (sequences of only two words from the title field), if we look at this it does give us some more information in regards to word order.
+However, the number of unique word combinations then goes back up greatly, so this will not be further evaluated.
+
+```{r}
+toks_bigram <-tokens_ngrams(toks,n = 2)
+dfm_bigram <-dfm(toks_bigram)
+
+top_features_bi <- topfeatures(dfm_bigram,10000)
+
+top_features_df_bi <- data.frame(
+  feature = names(top_features_bi),
+  count = as.numeric(top_features_bi))
+
+count(top_features_df_bi)
+
+top_features_df_bi <- top_features_df_bi |> filter(count >= 5)
+top_features_df_bi <- top_features_df_bi |> mutate(percentage_occured_non_blank = count / non_blank)
+head(top_features_df_bi,10)
+
+```
+
+### Clean Dataset
+
+In this section, we create a cleaned version of the leads dataset that we can use for EDA (and later modeling) without removing rows.
+
+#### **Steps:**
+
+-   Keep all original columns
+
+-   Standardize “missing-like” text in categorical fields by converting blanks and placeholder values (e.g., "Unknown", "Not Enough Info Found", "MISSING/BLANK") into true NA.
+
+-   Use a recipes pipeline to replace NA values in categorical predictor columns only with a consistent category level called "Low Info" so incomplete enrichment is explicit and rows are retained.
+
+-   Create indicator flags (site_lowinfo, mfg_lowinfo, title_lowinfo, site_or_mfg_lowinfo) that capture whether key enrichment fields ended up as "Low Info".
+
+-   We **do not modify** `next_stage_c` in the recipe because it represents the outcome; any missing outcomes remain missing and are handled separately when computing success rates.
+
+```{r Recipe-Cleaning}
+
+# Drop rows with missing target/outcome
+leads_model <- leads %>%
+  filter(!is.na(next_stage_c))
+
+# Convert placeholder text + blanks to NA (for character/factor columns)
+to_na_lowinfo <- function(x) {
+  x <- str_trim(x)
+  x <- na_if(x, "")
+  x <- if_else(
+    str_to_lower(x) %in% c("missing/blank", "unknown", "not enough info found"),
+    NA_character_,
+    x
+  )
+  x
+}
+
+rec_clean_only <- recipe(~ ., data = leads_model) %>%
+  # Keep IDs as-is (do not clean/encode them as predictors)
+  update_role(qal_id, contact_lead_id, new_role = "id") %>%
+  
+  # Keep outcome column as-is (do not clean it as a predictor)
+  update_role(next_stage_c, new_role = "outcome") %>%
+  
+  # Clean categorical predictors ONLY (excludes id + outcome roles)
+  step_mutate_at(all_nominal_predictors(), fn = to_na_lowinfo) %>%
+  
+  # Replace NA in categorical predictors with a consistent level
+  step_unknown(all_nominal_predictors(), new_level = "Low Info") %>%
+  
+  # Create flags AFTER "Low Info" exists
+  step_mutate(
+    site_lowinfo        = acct_primary_site_function == "Low Info",
+    mfg_lowinfo         = acct_manufacturing_model   == "Low Info",
+    title_lowinfo       = contact_lead_title         == "Low Info",
+    site_or_mfg_lowinfo = site_lowinfo | mfg_lowinfo
+  )
+
+# Apply recipe
+prep_clean_only <- prep(rec_clean_only, training = leads_model, retain = TRUE)
+leads_cleaned_only <- bake(prep_clean_only, new_data = NULL)
+
+# Quick checks
+dim(leads)
+dim(leads_cleaned_only)
+colSums(is.na(leads_cleaned_only))
+table(leads_cleaned_only$site_or_mfg_lowinfo, useNA = "ifany")
+
+```
+
+-   Once the recipe has done the data cleaning the last step is merging the one hot encoded data back to the main cleaned data frame.
+
+```{r}
+#change from factor before creating corpus/tokens
+leads_cleaned_only <- leads_cleaned_only %>%
+  mutate(contact_lead_title = as.character(contact_lead_title))
+
+#create corpus and tokens 
+corp <- corpus(
+  leads_cleaned_only,
+  text_field = "contact_lead_title")
+
+toks <- tokens(corp)
+
+toks_onehot <- tokens_select(
+  toks,
+  pattern = top_features_df$feature)
+
+#create one hot encoded matrix
+dfm_onehot <- dfm(toks_onehot)
+dfm_onehot_bin <- dfm_weight(dfm_onehot, scheme = "boolean")
+df_encoded <- convert(dfm_onehot_bin, to = "data.frame")
+
+#join back together
+leads_cleaned_only <-cbind(leads_cleaned_only, df_encoded[,-1])
+
+#check duplicated columns for target variable binary conversion
+colnames(leads_cleaned_only)[duplicated(colnames(leads_cleaned_only))]
+
+dup_cols <- colnames(leads_cleaned_only)[colnames(leads_cleaned_only) %in% colnames(leads_cleaned_only)[duplicated(colnames(leads_cleaned_only))]]
+dup_cols
+
+#view duplicate columns
+#leads_cleaned_only[, dup_cols]
+
+#drop solution.1
+leads_cleaned_final <- leads_cleaned_only[, colnames(leads_cleaned_only) != "solution.1"]
+head(leads_cleaned_final)
+
+#check for duplicates again
+colnames(leads_cleaned_final)[duplicated(colnames(leads_cleaned_final))]
+
+#now convert target to binary
+leads_cleaned_final <- leads_cleaned_final %>%
+  mutate(
+    next_stage_target = factor(
+      if_else(next_stage_c %in% c("SQL", "SQO", "Won"), 1, 0)
+    )
+  )
+
+#view dataframe
+head(leads_cleaned_final)
+
+#save final modeling-ready dataset
+dir.create("data", showWarnings = FALSE)
+saveRDS(leads_cleaned_final, "data/leads_cleaned_final.rds")
+
+```
+
+
+#Create Modeling Dataset
+
+In this section, we prepare the final dataset that will be used for modeling.
+Because the business problem is focused on Mx targeting, we keep only Mx leads, remove fields that should not be used as predictors, and make sure the target variable is labeled clearly for interpretation.
+
+```{r Modeling Dataset}
+# Keep Mx leads only and remove IDs + original outcome
+mx_model_data <- leads_cleaned_final %>%
+  filter(solution_rollup == "Mx") %>%
+  select(-qal_id, -contact_lead_id, -next_stage_c)
+
+# Drop leftover duplicate column if present
+if ("solution.1" %in% names(mx_model_data)) {
+  mx_model_data <- mx_model_data %>%
+    select(-solution.1)
+}
+
+# Relabel target for readability
+mx_model_data <- mx_model_data %>%
+  mutate(
+    next_stage_target = factor(
+      next_stage_target,
+      levels = c("0", "1"),
+      labels = c("Not Successful", "Successful")
+    )
+  )
+
+# Quick checks
+dim(mx_model_data)
+count(mx_model_data, next_stage_target)
+"solution.1" %in% names(mx_model_data)
+
+
+```
+
+# Train/Test Split
+
+The next step is to split the Mx dataset into a training set and a test set.
+The training set will be used to build the model, and the test set will be used later to check how well the model performs on new data.
+We use a 70/30 split, and we keep the success rate similar in both groups so the comparison is fair.
+
+```{r Train and Test Split}
+
+# Create 70/30 train/test split while keeping target balance similar
+set.seed(123)
+
+# Create split index
+split_index <- createDataPartition(
+  y = mx_model_data$next_stage_target,
+  p = 0.70,
+  list = FALSE
+)
+
+# Create training and test datasets
+mx_training_data <- mx_model_data[split_index, ]
+mx_test_data <- mx_model_data[-split_index, ]
+
+# Quick checks
+dim(mx_training_data)
+dim(mx_test_data)
+
+# Class balance by dataset
+bind_rows(
+  mx_training_data %>% mutate(dataset = "Training Set"),
+  mx_test_data %>% mutate(dataset = "Test Set")
+) %>%
+  count(dataset, next_stage_target)
+```
+
+
+# Modeling
+
+## Logistic Regression with Interaction combinations
+
+Additional attempts were made to improve upon the initial logistic regression model using combinations of interactions.
+As interpretability is necessary, this exlcudes the use of more complex "black-box" methods, necessitating further exploration of simpler modeling options.
+
+```{r}
+
+
+# Data Prep 
+train_lr <- mx_training_data
+
+train_lr$next_stage_target <- factor(train_lr$next_stage_target)
+levels(train_lr$next_stage_target) <- gsub(" ", "_", levels(train_lr$next_stage_target))
+
+# Case weights for imbalance
+case_weights_lr <- ifelse(train_lr$next_stage_target == "Successful", 7, 1)
+
+# CV Control 
+cv_control_lr <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  allowParallel   = TRUE,
+  verboseIter     = TRUE
+)
+
+# --- Create interaction terms automatically ---
+# model.matrix expands all factors AND creates pairwise interactions
+# between your most important features from RF/XGB
+
+top_features <- c("priority", "last_tactic_campaign_channel", 
+                  "acct_tier_rollup", "acct_primary_site_function",
+                  "solution", "acct_territory_rollup")
+
+# Create interaction matrix from top features only
+train_interactions <- model.matrix(
+  ~ .^2,
+  data = dplyr::select(train_lr, all_of(top_features))
+) %>% 
+  as.data.frame()
+
+
+# Remove intercept column using base R indexing
+train_interactions <- train_interactions[, colnames(train_interactions) != "(Intercept)"]
+
+# Add back remaining non-interacted columns
+remaining_cols <- dplyr::select(train_lr, -all_of(top_features), -next_stage_target)
+
+train_lr_final <- bind_cols(train_interactions, remaining_cols) %>%
+  mutate(next_stage_target = train_lr$next_stage_target)
+
+cat(sprintf("Columns after interactions: %d\n", ncol(train_lr_final)))
+
+# --- Grid Search (glmnet = regularized logistic regression) ---
+lr_grid <- expand.grid(
+  alpha  = c(0, 0.5, 1),     # 0 = Ridge, 1 = Lasso, 0.5 = ElasticNet
+  lambda = c(0.001, 0.01, 0.1, 1)  # Regularization strength
+)
+
+# --- Train ---
+lr_model <- train(
+  next_stage_target ~ .,
+  data      = train_lr_final,
+  method    = "glmnet",
+  metric    = "ROC",
+  trControl = cv_control_lr,
+  tuneGrid  = lr_grid,
+  weights   = case_weights_lr,
+  family    = "binomial"
+)
+
+cat("\n--- CV Results (top 5 by ROC) ---\n")
+lr_model$results %>% arrange(desc(ROC)) %>% head(5) %>% print()
+```
+
+### Interpretation of Output
+
+The top model outputs an **ROC AUC of .794** .
+The top performing combinations of hyper parameter values all outperform the previous model which is to be expected.
+Not a lot of detail will be given at this point on the results as future models are likely to out perform regression models.
+
+## Random Forest Model
+
+In this section a random forest model is trained, using both over sampled data and data matching the default class imbalance.
+
+### OverSampled
+
+Oversampling was used to get the data to a 50/50 class balance split.
+Then grid search and 5 fold cross validation was used.
+This process was run iteritavely to test and try and avoid overfitting.
+
+```{r}
+#drop qal cohort date
+mx_training_data <- mx_training_data %>% select(-qal_cohort_date)
+mx_test_data <- mx_test_data %>% select(-qal_cohort_date)
+```
+
+```{r}
+#create 50/50 data split
+train_balanced <- upSample(
+  x = mx_training_data %>% select(-next_stage_target),
+  y = mx_training_data$next_stage_target,
+  yname = "next_stage_target"
+)
+
+train_balanced <- train_balanced %>% select(-contact_lead_title)
+train_balanced$next_stage_target <-factor(train_balanced$next_stage_target)
+levels(train_balanced$next_stage_target) <- gsub(" ", "_", levels(train_balanced$next_stage_target))
+```
+
+```{r}
+#define cv params
+cv_control <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,           # Needed for ROC/AUC
+  summaryFunction = twoClassSummary, # Reports ROC, Sens, Spec
+  savePredictions = "final",
+  allowParallel   = TRUE,
+  verboseIter     = TRUE
+)
+
+#define grid search params
+#rf_grid <- expand.grid(
+ # mtry            = c(10, 20, 30, floor(sqrt(ncol(train_balanced) - 1))),
+  #splitrule       = c("gini", "extratrees"),
+  #min.node.size   = c(1, 5, 10)
+#)
+
+#for brevity on fileouptut best performing is hard coded
+rf_grid <- expand.grid(
+  mtry            = 30,
+  splitrule       = "gini",
+  min.node.size   = c(50)
+)
+```
+
+```{r}
+#train rf model
+rf_model <- train(
+  next_stage_target ~ .,
+  data       = train_balanced,
+  method     = "ranger",
+  metric     = "ROC",              # Optimise on AUC (better for imbalanced)
+  trControl  = cv_control,
+  tuneGrid   = rf_grid,
+  num.trees  = 500,
+  importance = "permutation"       # Required for variable importance
+)
+
+```
+
+```{r}
+cat("\n--- Best Hyperparameters ---\n")
+print(rf_model$bestTune)
+
+cat("\n--- CV Results (top 5 by ROC) ---\n")
+cv_results <- rf_model$results %>%
+  arrange(desc(ROC)) %>%
+  head(6)
+print(cv_results)
+#tree overfitting 
+```
+
+```{r}
+importance_df <- varImp(rf_model)$importance %>%
+  rownames_to_column("Feature") %>%
+  rename(Importance = Overall) %>%
+  arrange(desc(Importance)) %>%
+  head(50)
+
+print(importance_df)
+```
+
+```{r}
+# Fix test data factor levels
+mx_test_data$next_stage_target <- factor(mx_test_data$next_stage_target)
+levels(mx_test_data$next_stage_target) <- gsub(" ", "_", levels(mx_test_data$next_stage_target))
+
+# Use caret's predict wrapper — handles encoding internally
+test_probs <- predict(rf_model, newdata = mx_test_data, type = "prob")[, "Successful"]
+
+test_preds <- predict(rf_model, newdata = mx_test_data)
+
+# Evaluate
+cm <- confusionMatrix(test_preds, mx_test_data$next_stage_target, positive = "Successful")
+print(cm)
+
+cat(sprintf("\nTest AUC: %.4f\n", auc(roc(mx_test_data$next_stage_target, test_probs,
+                                          levels = c("Not_Successful", "Successful")))))
+```
+
+#### Interpretation of Output
+
+When attempting to use random forest with over sampled data to achieve a 50/50 class balance split, the cross validation and grid search always found the smallest number of terminal nodes to be the best.
+Initially the cross validation ROC-AUC was unreasonably high, so holdout data was used to verify that in fact the data was over fitting.
+When running on test data though every time their was a substantial drop off in AUC indicating over fitting, even when trying higher values of terminal nodes.The models all coalesced around AUC of .82 to .83 previous models.
+Testing this model to confirm it was over fitting did require using the holdout data which would constitute data leakage, given this and the tendency to over fit while not having great performance random forest appears to not be a good fit for this data.
+
+### Standard Class Distribution
+
+Next a random forest model was trained without oversampling (class imbalance), to avoid data leakage this time much higher terminal node values were chosen for grid search.
+Similar to before 5 fold cross validation was performed.
+
+```{r}
+# Use original training data with class weights instead of oversampling
+train_balanced <- mx_training_data %>% 
+  select(-contact_lead_title)
+
+train_balanced$next_stage_target <- factor(train_balanced$next_stage_target)
+levels(train_balanced$next_stage_target) <- gsub(" ", "_", levels(train_balanced$next_stage_target))
+```
+
+```{r}
+#define cv params
+cv_control <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,           # Needed for ROC/AUC
+  summaryFunction = twoClassSummary, # Reports ROC, Sens, Spec
+  savePredictions = "final",
+  allowParallel   = TRUE,
+  verboseIter     = TRUE
+)
+
+#define grid search params
+#rf_grid <- expand.grid(
+ # mtry            = c(10, 20, 30, floor(sqrt(ncol(train_balanced) - 1))),
+  #splitrule       = c("gini", "extratrees"),
+  #min.node.size   = c(1, 5, 10)
+#)
+
+# best values for brevity
+rf_grid <- expand.grid(
+  mtry            = c(20),
+  splitrule       = "gini",
+  min.node.size   = c(10)
+)
+```
+
+```{r}
+
+# Calculate per-row weights based on class
+case_weights <- ifelse(train_balanced$next_stage_target == "Successful", 7, 1)
+
+
+rf_model <- train(
+  next_stage_target ~ .,
+  data       = train_balanced,
+  method     = "ranger",
+  metric     = "ROC",
+  trControl  = cv_control,
+  tuneGrid   = rf_grid,
+  num.trees  = 500,
+  importance = "permutation",
+  weights = case_weights
+)
+```
+
+```{r}
+cat("\n--- Best Hyperparameters ---\n")
+print(rf_model$bestTune)
+
+cat("\n--- CV Results (top 5 by ROC) ---\n")
+cv_results <- rf_model$results %>%
+  arrange(desc(ROC)) %>%
+  head(6)
+print(cv_results)
+#tree overfitting 
+```
+
+#### Interpretation of Output
+
+When attempting to provide grid search parameters that would avoid overfitting ROC-AUC dropped substantially, and perfomed even worse then the prior trained model.
+Given the points discussed before it can be concluded that random forest is not a good fit for this data.
+
+## XG Boost
+
+A standard XGBoost model was trained, given XGBoost lacks interpretability this model is evaluated and will be contrasted with Explainable Boosting Machine next, which performs similar modeling but by design allows for explainability.
+If XGBoost has markedly better perofrmance over EBM, future steps will be taken to help explain the model decisions.
+
+```{r}
+# XGBoost version — matching your existing RF pipeline
+
+
+# --- Data Prep (no oversampling — use weights like RF v2) ---
+train_xgb <- mx_training_data %>% select(-contact_lead_title)
+train_xgb$next_stage_target <- factor(train_xgb$next_stage_target)
+levels(train_xgb$next_stage_target) <- gsub(" ", "_", levels(train_xgb$next_stage_target))
+
+# Case weights for imbalance
+case_weights_xgb <- ifelse(train_xgb$next_stage_target == "Successful", 7, 1)
+
+# --- CV Control (identical to RF) ---
+cv_control_xgb <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  allowParallel   = TRUE,
+  verboseIter     = TRUE
+)
+
+# --- Grid Search ---
+xgb_grid <- expand.grid(
+  nrounds          = 500,   # Number of trees
+  max_depth        = 6,            # Tree depth — keep shallow vs RF
+  eta              = 0.01,       # Learning rate
+  gamma            = 0,                  # Min loss reduction to split
+  colsample_bytree = 0.7,        # Fraction of cols per tree (like mtry)
+  min_child_weight = 5,            # Like min.node.size
+  subsample        = 0.8                 # Row sampling per tree
+)
+
+# --- Grid Search ---
+#xgb_grid <- expand.grid(
+ # nrounds          = c(100,250,500),   # Number of trees
+  #max_depth        = c(2,4,6),            # Tree depth — keep shallow vs RF
+  #eta              = c(.1,0.01),       # Learning rate
+  #gamma            = 0,                  # Min loss reduction to split
+  #colsample_bytree = c(0.7,0.5)        # Fraction of cols per tree (like mtry)
+  #min_child_weight = c(5,10,20)            # Like min.node.size
+  #subsample        = c(0.7,0.8)                 # Row sampling per tree
+#)
+
+cat(sprintf("Grid search over %d combinations...\n", nrow(xgb_grid)))
+
+# --- Train XGBoost ---
+xgb_model <- train(
+  next_stage_target ~ .,
+  data        = train_xgb,
+  method      = "xgbTree",
+  metric      = "ROC",
+  trControl   = cv_control_xgb,
+  tuneGrid    = xgb_grid,
+  weights     = case_weights_xgb,
+  verbosity   = 0                        # Suppress xgb internal logs
+)
+
+```
+
+```{r}
+# Fix test data factor levels to match training
+mx_test_data$next_stage_target <- factor(mx_test_data$next_stage_target)
+levels(mx_test_data$next_stage_target) <- gsub(" ", "_", levels(mx_test_data$next_stage_target))
+
+# Now run confusion matrix
+#cm_xgb <- confusionMatrix(test_preds_xgb, mx_test_data$next_stage_target, positive = "Successful")
+#print(cm_xgb)
+
+#cat(sprintf("\nTest AUC: %.4f\n", pROC::auc(pROC::roc(mx_test_data$next_stage_target, test_probs_xgb,
+                                                        #levels = c("Not_Successful", "Successful")))))
+```
+
+```{r}
+# --- Best Hyperparameters ---
+cat("\n--- Best Hyperparameters ---\n")
+print(xgb_model$bestTune)
+
+cat("\n--- CV Results (top 5 by ROC) ---\n")
+cv_results_xgb <- xgb_model$results %>%
+  arrange(desc(ROC)) %>%
+  head(10)
+print(cv_results_xgb)
+
+# --- Feature Importance ---
+importance_df_xgb <- varImp(xgb_model)$importance %>%
+  rownames_to_column("Feature") %>%
+  rename(Importance = Overall) %>%
+  arrange(desc(Importance)) %>%
+  head(5)
+print(importance_df_xgb)
+
+# --- Predict on Test Set ---
+test_probs_xgb <- predict(xgb_model, newdata = mx_test_data, type = "prob")[, "Successful"]
+test_preds_xgb <- predict(xgb_model, newdata = mx_test_data)
+
+# --- Evaluate ---
+cm_xgb <- confusionMatrix(test_preds_xgb, mx_test_data$next_stage_target, positive = "Successful")
+print(cm_xgb)
+
+cat(sprintf("\nTest AUC: %.4f\n", pROC::auc(pROC::roc(mx_test_data$next_stage_target, test_probs_xgb,
+                                                        levels = c("Not_Successful", "Successful")))))
+```
+
+#### Interpretation of Output
+
+This had similar performance to random forest with **AUC ROC of .82**, the model has a good balance of specificity being able to correctly identify 76% of leads that wouldn't progress and sensitivity being able to correctly identify 77% of real successful leads.
+We can see the top feature importance, which tells us what the most important feature is and then a score for the next most important relative to that.
+
+
+# Takeaway
+Only code and sections written by myself or the necessary prerequisite steps (loading in and performinig transformations) were included here. The modeling approaches done above were not the ones ultimately utilized, as we used EBM. The EBM had an impressive .86 AUC, while maintaining explainability. A few other narrative sections about the data exploration and application for the marketing team are also not included. 
+
+
